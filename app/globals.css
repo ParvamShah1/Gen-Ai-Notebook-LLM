@@ -184,3 +184,43 @@ button:disabled {
   padding: 40px 20px;
   font-size: 14px;
 }
+
+.rag-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-family: monospace;
+  cursor: default;
+}
+
+.badge-rewrite {
+  background: #1e293b;
+  color: #93c5fd;
+  border: 1px solid #334155;
+}
+
+.badge-variants {
+  background: #1a2332;
+  color: #a5b4fc;
+  border: 1px solid #2d3a55;
+}
+
+.badge-judge-ok {
+  background: #14261a;
+  color: #4ade80;
+  border: 1px solid #1e3a2b;
+}
+
+.badge-judge-filtered {
+  background: #261a14;
+  color: #fbbf24;
+  border: 1px solid #3a2b1e;
+}

@@ -8,11 +8,50 @@ type Source = {
   source?: string;
 };
 
+type RagMeta = {
+  originalQuery: string;
+  rewrittenQuery: string;
+  variants: string[];
+  wasRewritten: boolean;
+  retrieved: number;
+  kept: number;
+  dropped: number;
+  grades: string[];
+};
+
 type Message = {
   role: "user" | "assistant";
   content: string;
   sources?: Source[];
+  rag?: RagMeta;
 };
+
+function RagBadges({ rag }: { rag: RagMeta }) {
+  return (
+    <div className="rag-badges">
+      {rag.wasRewritten && (
+        <span className="badge badge-rewrite" title={`Original: "${rag.originalQuery}"`}>
+          rewritten &rarr; &ldquo;{rag.rewrittenQuery.slice(0, 60)}
+          {rag.rewrittenQuery.length > 60 ? "…" : ""}&rdquo;
+        </span>
+      )}
+      {rag.variants.length > 0 && (
+        <span
+          className="badge badge-variants"
+          title={rag.variants.join("\n")}
+        >
+          +{rag.variants.length} query variant{rag.variants.length > 1 ? "s" : ""}
+        </span>
+      )}
+      <span
+        className={`badge ${rag.dropped > 0 ? "badge-judge-filtered" : "badge-judge-ok"}`}
+        title={`Grades: ${rag.grades.join(", ")}`}
+      >
+        judge kept {rag.kept}/{rag.kept + rag.dropped} chunks
+      </span>
+    </div>
+  );
+}
 
 export default function Home() {
   const [docId, setDocId] = useState<string | null>(null);
@@ -79,7 +118,12 @@ export default function Home() {
 
       setMessages((m) => [
         ...m,
-        { role: "assistant", content: data.answer, sources: data.sources },
+        {
+          role: "assistant",
+          content: data.answer,
+          sources: data.sources,
+          rag: data.rag,
+        },
       ]);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
@@ -97,7 +141,7 @@ export default function Home() {
       <h1>NoteBook RAG</h1>
       <p className="tagline">
         Upload a PDF or text file, then ask questions grounded in its content.
-        Powered by Gemini + Qdrant.
+        Powered by Gemini + Qdrant with Corrective RAG.
       </p>
 
       <form className="card" onSubmit={handleUpload}>
@@ -135,6 +179,7 @@ export default function Home() {
                   {m.role === "user" ? "You" : "Assistant"}
                 </div>
                 <div>{m.content}</div>
+                {m.rag && <RagBadges rag={m.rag} />}
                 {m.sources && m.sources.length > 0 && (
                   <details className="sources">
                     <summary>Sources ({m.sources.length})</summary>

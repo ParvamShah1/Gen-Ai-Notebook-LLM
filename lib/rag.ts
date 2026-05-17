@@ -83,3 +83,33 @@ export async function retrieveTopK(
     must: [{ key: "metadata.docId", match: { value: docId } }],
   });
 }
+
+// Multi-query retrieval: runs multiple query variants in parallel against
+// Qdrant, then deduplicates by the first 160 chars of content (CRAG step 2).
+export async function multiQueryRetrieve(
+  queries: string[],
+  docId: string,
+  perQueryK = 6,
+): Promise<Document[]> {
+  const store = await QdrantVectorStore.fromExistingCollection(
+    embeddings(),
+    qdrantConfig(),
+  );
+  const filter = {
+    must: [{ key: "metadata.docId", match: { value: docId } }],
+  };
+  const results = await Promise.all(
+    queries.map((q) => store.similaritySearch(q, perQueryK, filter)),
+  );
+  return dedupeChunks(results.flat());
+}
+
+function dedupeChunks(docs: Document[]): Document[] {
+  const seen = new Set<string>();
+  return docs.filter((d) => {
+    const key = d.pageContent.slice(0, 160);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}

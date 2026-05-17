@@ -8,28 +8,51 @@ Built with Next.js 16, LangChain, Gemini, and Qdrant Cloud.
 
 > Deploy to Vercel and put the link here.
 
-## How it works (RAG pipeline)
+## How it works (RAG pipeline with CRAG)
 
 ```
-Upload  ──►  Parse  ──►  Chunk  ──►  Embed (Gemini)  ──►  Qdrant
-                                                             │
-                              User question ──► Embed ───────┘
+                        ┌─── Corrective RAG (CRAG) ───┐
+                        │                              │
+User question           │                              │
+      │                 │                              │
+      ▼                 │                              │
+  Query Rewriter ───────┤  (gemini-2.0-flash)          │
+      │                 │                              │
+      ├─ cleaned query  │                              │
+      ├─ variant 1      │                              │
+      └─ variant 2      │                              │
+           │            │                              │
+           ▼            │                              │
+  Multi-Query Retrieve  │  3 queries → Qdrant → dedup  │
+           │            │                              │
+           ▼            │                              │
+  LLM-as-Judge ─────────┤  grade: relevant/ambiguous/  │
+      │                 │  irrelevant → drop bad ones  │
+      │                 │                              │
+      └─────────────────┘                              │
+           │                                           │
+           ▼                                           │
+  Guarded Generation ──── gemini-2.5-flash ── Answer   │
                                                        │
-                                                       ▼
-                                       Top-k chunks → Gemini → Answer
+Upload ─► Parse ─► Chunk ─► Embed ─► Qdrant ──────────┘
 ```
 
-1. **Ingestion** (`/api/ingest`)
-   - PDFs are parsed with LangChain's `PDFLoader` (one document per page, page numbers preserved in metadata).
-   - Text files are read directly into a single document.
+### Ingestion pipeline
+
+1. **Parsing** (`/api/ingest`) — PDFs via LangChain's `PDFLoader` (page numbers preserved); plain text read directly.
 2. **Chunking** — `RecursiveCharacterTextSplitter` with `chunkSize: 1000` and `chunkOverlap: 200`.
    - Walks separators in priority order (`\n\n` → `\n` → ` ` → `""`), so chunks respect paragraph and sentence boundaries before falling back to character-level splits.
    - 200-character overlap keeps context across boundaries so an answer that straddles two chunks isn't lost.
-3. **Embedding** — Google `text-embedding-004` (768 dims).
-4. **Storage** — Qdrant Cloud. All chunks land in a single collection (`notebook-rag`); each chunk is tagged with a unique `docId` in its payload so different uploads don't bleed into each other.
-5. **Retrieval** (`/api/query`) — embeds the question, runs a Qdrant similarity search filtered by `docId`, returns top 4 chunks.
-6. **Generation** — `gemini-2.5-flash` with a strict system prompt that forbids using outside knowledge. If the answer isn't in the retrieved context, the model replies *"I could not find this in the document."*
-7. **Citations** — every answer ships with the source chunks (page numbers when available), shown under each response.
+3. **Embedding** — Google `gemini-embedding-001` (3072 dims).
+4. **Storage** — Qdrant Cloud. All chunks land in a single collection (`notebook-rag`); each chunk is tagged with a unique `docId` in its payload so different uploads don't bleed into each other. A payload index on `metadata.docId` is auto-created for filtered retrieval.
+
+### CRAG query pipeline
+
+5. **Query Rewriting** (`lib/queryRewriter.ts`) — `gemini-2.0-flash` fixes typos, expands abbreviations, and generates 2 alternative paraphrases to improve retrieval coverage.
+6. **Multi-Query Retrieval** (`lib/rag.ts`) — all 3 queries (cleaned + 2 variants) run in parallel against Qdrant with `k=6` each. Results are deduplicated by the first 160 characters.
+7. **LLM-as-Judge** (`lib/judge.ts`) — `gemini-2.0-flash` grades each chunk as `relevant`, `ambiguous`, or `irrelevant`. Irrelevant chunks are dropped before reaching the generation model. If every chunk is dropped, the system returns a canned "not found" message instead of hallucinating.
+8. **Guarded Generation** — `gemini-2.5-flash` (the larger model, reserved only for the final answer) with a strict system prompt forbidding outside knowledge.
+9. **Citations + CRAG metadata** — every response shows source chunks with page numbers, plus inline badges: rewritten query, variant count, and judge kept/total.
 
 ## Local setup
 
@@ -64,13 +87,15 @@ The Qdrant collection (`notebook-rag`) is auto-created on the first upload — n
 ```
 app/
   api/
-    ingest/route.ts   # parses + chunks + embeds the upload, writes to Qdrant
-    query/route.ts    # embeds question, retrieves from Qdrant, calls Gemini
-  page.tsx            # upload form + chat UI
+    ingest/route.ts     # parse + chunk + embed + write to Qdrant
+    query/route.ts      # CRAG pipeline: rewrite → multi-retrieve → judge → generate
+  page.tsx              # upload form + chat UI + CRAG badges
   layout.tsx
   globals.css
 lib/
-  rag.ts              # chunking, Gemini embeddings, Qdrant store + retrieval
+  rag.ts                # chunking, embeddings, Qdrant store, multi-query retrieval
+  queryRewriter.ts      # CRAG step 1: typo fixing + query paraphrasing
+  judge.ts              # CRAG step 3: LLM-as-judge relevance grading
 ```
 
 ## Tech

@@ -1,9 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import { retrieveTopK } from "@/lib/rag";
+import { multiQueryRetrieve } from "@/lib/rag";
+import { rewriteQuery } from "@/lib/queryRewriter";
+import { judgeChunks, type Grade } from "@/lib/judge";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
+
+const MAX_CONTEXT_CHUNKS = 10;
 
 const SYSTEM_PROMPT = `You are a helpful assistant that answers questions strictly using the provided context from a user-uploaded document.
 
@@ -35,15 +39,60 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const top = await retrieveTopK(question, docId, 4);
-    if (top.length === 0) {
+    // ── CRAG Step 1: Query Rewriting ──
+    const rewrite = await rewriteQuery(question);
+    const allQueries = [rewrite.cleaned, ...rewrite.variants];
+
+    // ── CRAG Step 2: Multi-query Retrieval ──
+    const retrieved = await multiQueryRetrieve(allQueries, docId, 6);
+
+    if (retrieved.length === 0) {
       return NextResponse.json({
         answer: "I could not find this in the document.",
         sources: [],
+        rag: {
+          originalQuery: question,
+          rewrittenQuery: rewrite.cleaned,
+          variants: rewrite.variants,
+          wasRewritten: rewrite.wasRewritten,
+          retrieved: 0,
+          kept: 0,
+          dropped: 0,
+          grades: [],
+        },
       });
     }
 
-    const context = top
+    // ── CRAG Step 3: LLM-as-Judge Relevance Grading ──
+    const judgeResult = await judgeChunks(
+      rewrite.cleaned,
+      retrieved.map((d) => ({ text: d.pageContent })),
+    );
+
+    const kept = retrieved.filter(
+      (_, i) => judgeResult.grades[i] !== "irrelevant",
+    );
+
+    if (kept.length === 0) {
+      return NextResponse.json({
+        answer: "I could not find relevant information about this in the document.",
+        sources: [],
+        rag: {
+          originalQuery: question,
+          rewrittenQuery: rewrite.cleaned,
+          variants: rewrite.variants,
+          wasRewritten: rewrite.wasRewritten,
+          retrieved: retrieved.length,
+          kept: 0,
+          dropped: retrieved.length,
+          grades: judgeResult.grades,
+        },
+      });
+    }
+
+    // ── CRAG Step 4: Guarded Generation ──
+    const contextChunks = kept.slice(0, MAX_CONTEXT_CHUNKS);
+    const context = contextChunks
       .map(
         (d, i) =>
           `[#${i + 1}${d.metadata?.loc?.pageNumber ? ` page ${d.metadata.loc.pageNumber}` : ""}]\n${d.pageContent}`,
@@ -73,11 +122,21 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       answer,
-      sources: top.map((d) => ({
+      sources: contextChunks.map((d) => ({
         page: d.metadata?.loc?.pageNumber,
         text: d.pageContent,
         source: d.metadata?.source,
       })),
+      rag: {
+        originalQuery: question,
+        rewrittenQuery: rewrite.cleaned,
+        variants: rewrite.variants,
+        wasRewritten: rewrite.wasRewritten,
+        retrieved: retrieved.length,
+        kept: judgeResult.kept,
+        dropped: judgeResult.dropped,
+        grades: judgeResult.grades,
+      },
     });
   } catch (err) {
     console.error("query error", err);
